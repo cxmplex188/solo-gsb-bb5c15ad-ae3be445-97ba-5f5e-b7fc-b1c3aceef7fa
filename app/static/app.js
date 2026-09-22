@@ -15,6 +15,8 @@ document.getElementById("session-id").textContent = SESSION_ID;
 
 // ---------- State ----------
 let analysis = null;
+let stabResult = null;
+let stabRunning = false;
 
 const $ = (sel) => document.querySelector(sel);
 const dashboard = $("#dashboard");
@@ -85,7 +87,163 @@ function render() {
   renderReversals();
   renderRanks();
   renderDetails();
+  renderExperiment();
 }
+
+// ---------- Ranking stability experiment ----------
+function invalidateExperiment(msg) {
+  if (!stabResult) return;
+  stabResult = null;
+  renderExperiment();
+  if (msg) toast(msg);
+}
+
+function renderExperiment() {
+  const typeSel = $("#stab-exclude-type");
+  const targetSel = $("#stab-target");
+  const banner = $("#stab-banner");
+  const wrap = $("#stab-table-wrap");
+  const runBtn = $("#btn-stab-run");
+
+  if (!analysis || analysis.counts.scores === 0) {
+    targetSel.innerHTML = "";
+    banner.hidden = true;
+    wrap.innerHTML = "";
+    runBtn.disabled = true;
+    typeSel.disabled = true;
+    return;
+  }
+  typeSel.disabled = false;
+  runBtn.disabled = stabRunning;
+  runBtn.textContent = stabRunning ? "计算中…" : "运行实验";
+
+  const names = typeSel.value === "judge" ? analysis.judges : analysis.items;
+  const prev = targetSel.value;
+  targetSel.innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  if (names.includes(prev)) targetSel.value = prev;
+
+  if (!stabResult) {
+    banner.hidden = true;
+    wrap.innerHTML = `<p class="hint">选择评委或项目后点击「运行实验」查看对比。</p>`;
+    return;
+  }
+
+  const r = stabResult;
+  const bc = r.baseline_counts;
+  const ec = r.experiment_counts;
+  banner.hidden = false;
+  banner.innerHTML =
+    `<b>实验中：</b>临时排除${esc(r.exclude_type_label)}「<b>${esc(r.exclude_target)}</b>」` +
+    `（按${esc(r.scope_label)}重算，忽略 ${r.removed_scores} 条评分：${bc.scores} → ${ec.scores} 条）。` +
+    `全局中位数 ${fmt(r.reference_baseline.global_median, 3)} → ${fmt(r.reference_experiment.global_median, 3)}，` +
+    `全局 MAD ${fmt(r.reference_baseline.global_mad, 3)} → ${fmt(r.reference_experiment.global_mad, 3)}。` +
+    `结果不写入会话裁决或数据库。` +
+    ` <button id="btn-stab-clear" class="btn btn-ghost-inline">清除实验，恢复基线</button>`;
+  $("#btn-stab-clear").addEventListener("click", clearExperiment);
+
+  const head = `<tr>
+    <th>选手</th>
+    <th class="num">受影响<br>评分数</th>
+    <th class="num">原始总分<br>基线 → 实验</th>
+    <th class="num">总分变化</th>
+    <th class="num">原始名次<br>基线 → 实验</th>
+    <th class="num">校准总分<br>基线 → 实验</th>
+    <th class="num">总分变化</th>
+    <th class="num">校准名次<br>基线 → 实验</th>
+    <th class="num">最终总分<br>基线 → 实验</th>
+    <th class="num">总分变化</th>
+    <th class="num">最终名次<br>基线 → 实验</th>
+    <th class="num">名次变化</th>
+  </tr>`;
+  const rows = r.rows.map((row) => {
+    if (row.missing) {
+      return `<tr class="stab-missing">
+        <td>${esc(row.contestant)}<br><small>剩余评分为 0，无法参与排名</small></td>
+        <td class="num">${row.affected_scores}</td>
+        <td class="num">${fmt(row.raw_total)}</td>
+        <td class="num">—</td>
+        <td class="num">${row.raw_rank}</td>
+        <td class="num">${fmt(row.cal_total)}</td>
+        <td class="num">—</td>
+        <td class="num">${row.cal_rank}</td>
+        <td class="num">${fmt(row.eff_total)}</td>
+        <td class="num">—</td>
+        <td class="num">${row.eff_rank}</td>
+        <td class="num">—</td>
+      </tr>`;
+    }
+    return `<tr>
+      <td>${esc(row.contestant)}${
+        row.exp_item_count !== row.baseline_item_count
+          ? `<br><small>参评项目 ${row.baseline_item_count} → ${row.exp_item_count}</small>`
+          : ""
+      }</td>
+      <td class="num">${row.affected_scores}</td>
+      <td class="num">${totalCell(row.raw_total, row.raw_total_exp)}</td>
+      <td class="num">${signedHtml(row.raw_total_delta)}</td>
+      <td class="num">${rankCell(row.raw_rank, row.raw_rank_exp)}</td>
+      <td class="num">${totalCell(row.cal_total, row.cal_total_exp)}</td>
+      <td class="num">${signedHtml(row.cal_total_delta)}</td>
+      <td class="num">${rankCell(row.cal_rank, row.cal_rank_exp)}</td>
+      <td class="num">${totalCell(row.eff_total, row.eff_total_exp)}</td>
+      <td class="num">${signedHtml(row.eff_total_delta)}</td>
+      <td class="num">${rankCell(row.eff_rank, row.eff_rank_exp)}</td>
+      <td class="num">${deltaHtml(row.eff_rank_delta)}</td>
+    </tr>`;
+  }).join("");
+  wrap.innerHTML = `<table>${head}${rows}</table>`;
+}
+
+function totalCell(base, exp) {
+  return `${fmt(base)} → <b>${fmt(exp)}</b>`;
+}
+
+function rankCell(base, exp) {
+  const changed = base !== exp;
+  return `${base} → <b class="${changed ? "rank-changed" : ""}">${exp}</b>`;
+}
+
+function signedHtml(d) {
+  if (Math.abs(d) < 1e-9) return `<span class="delta-flat">±0.00</span>`;
+  const cls = d > 0 ? "delta-up" : "delta-down";
+  const sign = d > 0 ? "+" : "−";
+  return `<span class="${cls}">${sign}${fmt(Math.abs(d))}</span>`;
+}
+
+async function runExperiment() {
+  if (!analysis || analysis.counts.scores === 0 || stabRunning) return;
+  const type = $("#stab-exclude-type").value;
+  const target = $("#stab-target").value;
+  if (!target) {
+    toast("没有可排除的对象", true);
+    return;
+  }
+  stabRunning = true;
+  renderExperiment();
+  try {
+    const qs = new URLSearchParams({ exclude_type: type, target });
+    stabResult = await api(`/api/sessions/${SESSION_ID}/stability?${qs.toString()}`);
+    renderExperiment();
+    toast("实验完成，清除后可恢复基线");
+  } catch (err) {
+    toast("实验失败：" + err.message, true);
+  } finally {
+    stabRunning = false;
+    renderExperiment();
+  }
+}
+
+function clearExperiment() {
+  stabResult = null;
+  renderExperiment();
+  toast("已清除实验结果，恢复基线");
+}
+
+$("#stab-exclude-type").addEventListener("change", () => {
+  stabResult = null;
+  renderExperiment();
+});
+$("#btn-stab-run").addEventListener("click", runExperiment);
 
 function renderGroups() {
   const byItem = analysis.scope === "judge_item";
@@ -228,6 +386,7 @@ async function pushDecision(scoreId, useRaw, reason) {
         body: JSON.stringify({ use_raw: useRaw, reason }),
       }
     );
+    stabResult = null;
     render();
     toast("排名已实时重算");
   } catch (err) {
@@ -265,9 +424,11 @@ function onReasonInput(ev) {
 async function loadAnalysis() {
   try {
     analysis = await api(`/api/sessions/${SESSION_ID}/analysis`);
+    stabResult = null;
     render();
   } catch (_) {
     analysis = null;
+    stabResult = null;
     render();
   }
 }
@@ -290,6 +451,7 @@ $("#file-input").addEventListener("change", async (ev) => {
       method: "POST",
       body: fd,
     });
+    stabResult = null;
     render();
     setMsg(`已导入 ${analysis.counts.scores} 条评分`, "ok");
     toast("上传成功，已完成稳健标准化");
@@ -308,6 +470,7 @@ $("#btn-sample").addEventListener("click", async () => {
     analysis = await api(`/api/sessions/${SESSION_ID}/sample?scope=${encodeURIComponent(scope)}`, {
       method: "POST",
     });
+    stabResult = null;
     render();
     setMsg(`示例数据已载入（${analysis.counts.scores} 条评分）`, "ok");
     toast("示例数据已载入");
@@ -326,6 +489,7 @@ document.querySelectorAll('input[name="scope"]').forEach((radio) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ scope: ev.target.value }),
       });
+      stabResult = null;
       render();
       toast("校准范围已切换");
     } catch (err) {
@@ -339,6 +503,7 @@ $("#btn-reset-decisions").addEventListener("click", async () => {
   if (!confirm("确定清除全部「保留原分」裁决与理由，统一恢复为采用校准分？")) return;
   try {
     analysis = await api(`/api/sessions/${SESSION_ID}/decisions/reset`, { method: "POST" });
+    stabResult = null;
     render();
     toast("已全部恢复为采用校准分");
   } catch (err) {
@@ -355,6 +520,7 @@ $("#btn-clear").addEventListener("click", async () => {
   try {
     await api(`/api/sessions/${SESSION_ID}`, { method: "DELETE" });
     analysis = null;
+    stabResult = null;
     render();
     setMsg("会话已清空。");
     toast("会话已清空");

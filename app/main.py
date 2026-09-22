@@ -12,7 +12,13 @@ from pydantic import BaseModel, Field
 
 from . import database as db
 from .csv_io import CSVParseError, build_audit_csv, parse_scores
-from .scoring import SCOPES, SCOPE_JUDGE, analyze
+from .scoring import (
+    EXCLUDE_TYPES,
+    SCOPES,
+    SCOPE_JUDGE,
+    analyze,
+    stability_experiment,
+)
 
 SAMPLE_PATH = os.environ.get(
     "CALIB_SAMPLE_PATH",
@@ -130,6 +136,35 @@ def reset_decisions(session_id: str) -> dict[str, Any]:
         analysis = _build_analysis(conn, session_id, scope)
         analysis["reset_count"] = removed
         return analysis
+
+
+@app.get("/api/sessions/{session_id}/stability")
+def stability(
+    session_id: str,
+    exclude_type: str,
+    target: str,
+    scope: str | None = None,
+) -> dict[str, Any]:
+    """Temporarily drop one judge or one item and recompute everything.
+
+    Read-only: no scores, decisions or session state are modified.
+    """
+    if exclude_type not in EXCLUDE_TYPES:
+        raise HTTPException(status_code=400, detail=f"不支持的排除类型: {exclude_type}")
+    with db.get_conn() as conn:
+        if db.get_scope(conn, session_id) is None:
+            raise HTTPException(status_code=404, detail="会话不存在，请先上传数据。")
+        effective_scope = _resolve_scope(conn, session_id, scope)
+        records = db.load_scores(conn, session_id)
+        if not records:
+            raise HTTPException(status_code=400, detail="当前会话没有评分数据。")
+        decisions = db.load_decisions(conn, session_id)
+    try:
+        return stability_experiment(
+            records, decisions, effective_scope, exclude_type, target
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.delete("/api/sessions/{session_id}")

@@ -95,6 +95,80 @@ class TestAPI(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertGreater(r.json()["counts"]["scores"], 0)
 
+    def test_09a_stability_exclude_judge(self):
+        # Sample: 6 contestants x 4 judges x 3 items = 72 scores.
+        r = client.get(
+            f"/api/sessions/{SID}/stability",
+            params={"exclude_type": "judge", "target": "评委乙"},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        data = r.json()
+        self.assertEqual(data["experiment"], "ranking_stability")
+        self.assertEqual(data["exclude_type"], "judge")
+        self.assertEqual(data["exclude_target"], "评委乙")
+        self.assertEqual(data["removed_scores"], 18)  # 6 contestants x 3 items
+        self.assertEqual(data["experiment_counts"]["judges"], 3)
+        self.assertEqual(len(data["rows"]), 6)
+        row = data["rows"][0]
+        for key in ("raw_total", "raw_total_exp", "raw_rank_delta",
+                    "eff_rank", "eff_rank_exp", "affected_scores", "missing"):
+            self.assertIn(key, row)
+        self.assertFalse(any(rw["missing"] for rw in data["rows"]))
+        # Read-only: baseline session data untouched.
+        a = client.get(f"/api/sessions/{SID}/analysis").json()
+        self.assertEqual(a["counts"]["scores"], 72)
+        self.assertEqual(a["counts"]["judges"], 4)
+
+    def test_09b_stability_exclude_item(self):
+        r = client.get(
+            f"/api/sessions/{SID}/stability",
+            params={"exclude_type": "item", "target": "技术展示"},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        data = r.json()
+        self.assertEqual(data["removed_scores"], 24)  # 6 contestants x 4 judges
+        self.assertEqual(data["experiment_counts"]["items"], 2)
+        for rw in data["rows"]:
+            self.assertEqual(rw["affected_scores"], 4)
+            self.assertEqual(rw["exp_item_count"], 2)
+
+    def test_09c_stability_scope_param_and_errors(self):
+        # Explicit scope override is honored.
+        r = client.get(
+            f"/api/sessions/{SID}/stability",
+            params={"exclude_type": "judge", "target": "评委甲", "scope": "judge_item"},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["scope"], "judge_item")
+        # Stored session scope must not have changed.
+        self.assertEqual(
+            client.get(f"/api/sessions/{SID}/analysis").json()["scope"], "judge"
+        )
+        # Bad exclude type.
+        self.assertEqual(
+            client.get(
+                f"/api/sessions/{SID}/stability",
+                params={"exclude_type": "bogus", "target": "X"},
+            ).status_code,
+            400,
+        )
+        # Unknown target.
+        self.assertEqual(
+            client.get(
+                f"/api/sessions/{SID}/stability",
+                params={"exclude_type": "judge", "target": "不存在的评委"},
+            ).status_code,
+            404,
+        )
+        # Unknown session.
+        self.assertEqual(
+            client.get(
+                "/api/sessions/no-such-session/stability",
+                params={"exclude_type": "judge", "target": "X"},
+            ).status_code,
+            404,
+        )
+
     def test_10_clear(self):
         r = client.delete(f"/api/sessions/{SID}")
         self.assertEqual(r.status_code, 200)

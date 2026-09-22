@@ -29,6 +29,14 @@ SCOPE_LABELS = {
     SCOPE_JUDGE_ITEM: "按评委×项目",
 }
 
+EXCLUDE_JUDGE = "judge"
+EXCLUDE_ITEM = "item"
+EXCLUDE_TYPES = (EXCLUDE_JUDGE, EXCLUDE_ITEM)
+EXCLUDE_LABELS = {
+    EXCLUDE_JUDGE: "评委",
+    EXCLUDE_ITEM: "项目",
+}
+
 TIE_EPS = 1e-9
 
 
@@ -250,4 +258,131 @@ def analyze(
             "items": len(items),
             "decisions": sum(1 for v in decisions.values() if v[0]),
         },
+    }
+
+
+def stability_experiment(
+    records: Sequence[Mapping[str, Any]],
+    decisions: Mapping[int, tuple[bool, str]],
+    scope: str,
+    exclude_type: str,
+    exclude_target: str,
+) -> dict[str, Any]:
+    """Recompute the whole pipeline with one judge or one item temporarily removed.
+
+    The calibration is re-fitted on the remaining records (group medians/MADs
+    and the global reference all change), so totals and ranks are compared
+    position by position against the baseline ``analyze`` result. Nothing here
+    touches the caller's data; the experiment is read-only.
+    """
+    if scope not in SCOPES:
+        raise ValueError(f"未知校准范围: {scope}")
+    if exclude_type not in EXCLUDE_TYPES:
+        raise ValueError(f"不支持的排除类型: {exclude_type}")
+
+    def field(rec: Mapping[str, Any]) -> str:
+        return rec["judge"] if exclude_type == EXCLUDE_JUDGE else rec["item"]
+
+    available = sorted({field(r) for r in records})
+    if exclude_target not in available:
+        raise ValueError(
+            f"要排除的{EXCLUDE_LABELS[exclude_type]}不存在: {exclude_target}"
+        )
+
+    kept = [r for r in records if field(r) != exclude_target]
+    removed_count = len(records) - len(kept)
+
+    # Decisions attached to removed scores must not leak into the scenario.
+    kept_ids = {r["id"] for r in kept}
+    kept_decisions = {sid: v for sid, v in decisions.items() if sid in kept_ids}
+
+    # Per-contestant affected scores (counted against the baseline data set).
+    affected: dict[str, int] = defaultdict(int)
+    for r in records:
+        if field(r) == exclude_target:
+            affected[r["contestant"]] += 1
+
+    baseline = analyze(records, decisions, scope=scope)
+    scenario = analyze(kept, kept_decisions, scope=scope)
+
+    base_by_name = {b["contestant"]: b for b in baseline["contestants"]}
+    sc_by_name = {b["contestant"]: b for b in scenario["contestants"]}
+
+    rows: list[dict[str, Any]] = []
+    for name, b in base_by_name.items():
+        s = sc_by_name.get(name)
+        if s is None:
+            row = {
+                "contestant": name,
+                "raw_total": b["raw_total"],
+                "raw_rank": b["raw_rank"],
+                "cal_total": b["cal_total"],
+                "cal_rank": b["cal_rank"],
+                "eff_total": b["eff_total"],
+                "eff_rank": b["eff_rank"],
+                "raw_total_exp": None,
+                "raw_rank_exp": None,
+                "cal_total_exp": None,
+                "cal_rank_exp": None,
+                "eff_total_exp": None,
+                "eff_rank_exp": None,
+                "raw_rank_delta": None,
+                "cal_rank_delta": None,
+                "eff_rank_delta": None,
+                "raw_total_delta": None,
+                "cal_total_delta": None,
+                "eff_total_delta": None,
+                "baseline_item_count": b["item_count"],
+                "exp_item_count": 0,
+                "affected_scores": affected.get(name, 0),
+                "missing": True,
+            }
+        else:
+            row = {
+                "contestant": name,
+                "raw_total": b["raw_total"],
+                "raw_rank": b["raw_rank"],
+                "cal_total": b["cal_total"],
+                "cal_rank": b["cal_rank"],
+                "eff_total": b["eff_total"],
+                "eff_rank": b["eff_rank"],
+                "raw_total_exp": s["raw_total"],
+                "raw_rank_exp": s["raw_rank"],
+                "cal_total_exp": s["cal_total"],
+                "cal_rank_exp": s["cal_rank"],
+                "eff_total_exp": s["eff_total"],
+                "eff_rank_exp": s["eff_rank"],
+                # rank delta >0 means the contestant moved up (smaller rank).
+                "raw_rank_delta": b["raw_rank"] - s["raw_rank"],
+                "cal_rank_delta": b["cal_rank"] - s["cal_rank"],
+                "eff_rank_delta": b["eff_rank"] - s["eff_rank"],
+                "raw_total_delta": s["raw_total"] - b["raw_total"],
+                "cal_total_delta": s["cal_total"] - b["cal_total"],
+                "eff_total_delta": s["eff_total"] - b["eff_total"],
+                "baseline_item_count": b["item_count"],
+                "exp_item_count": s["item_count"],
+                "affected_scores": affected.get(name, 0),
+                "missing": False,
+            }
+        rows.append(row)
+
+    # Order like the experiment ranking; contestants who lost every score last.
+    rows.sort(key=lambda r: (
+        r["eff_rank_exp"] if r["eff_rank_exp"] is not None else 1 << 30,
+        r["contestant"],
+    ))
+
+    return {
+        "experiment": "ranking_stability",
+        "scope": scope,
+        "scope_label": SCOPE_LABELS[scope],
+        "exclude_type": exclude_type,
+        "exclude_type_label": EXCLUDE_LABELS[exclude_type],
+        "exclude_target": exclude_target,
+        "removed_scores": removed_count,
+        "reference_baseline": baseline["reference"],
+        "reference_experiment": scenario["reference"],
+        "rows": rows,
+        "baseline_counts": baseline["counts"],
+        "experiment_counts": scenario["counts"],
     }

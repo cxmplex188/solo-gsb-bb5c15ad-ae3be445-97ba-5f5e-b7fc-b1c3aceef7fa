@@ -65,9 +65,35 @@
       <div id="rank-table-wrap" class="table-wrap"></div>
     </section>
 
-    <!-- 4. 逐项裁决 -->
+    <!-- 4. 排名稳定性实验 -->
+    <section class="card" id="panel-stability">
+      <h2>④ 排名稳定性实验</h2>
+      <p class="hint">
+        选择临时排除<b>一名评委</b>或<b>一个项目</b>，按当前校准范围在剩余评分上重新拟合中位数/MAD 并重算
+        原始、校准与最终总分及竞赛名次，逐位对比相对基线的变化与受影响评分数。
+        实验结果仅用于观察，<b>不会写入裁决或数据库</b>，清除后即恢复基线。
+      </p>
+      <div class="toolbar">
+        <label>排除类型：
+          <select id="stab-exclude-type">
+            <option value="judge">一名评委</option>
+            <option value="item">一个项目</option>
+          </select>
+        </label>
+        <label>排除对象：
+          <select id="stab-target"></select>
+        </label>
+        <button id="btn-stab-run" class="btn btn-primary">运行实验</button>
+      </div>
+      <div id="stab-banner" class="stab-banner" hidden></div>
+      <div id="stab-table-wrap" class="table-wrap">
+        <p class="hint">选择评委或项目后点击「运行实验」查看对比。</p>
+      </div>
+    </section>
+
+    <!-- 5. 逐项裁决 -->
     <section class="card">
-      <h2>④ 逐项评分裁决</h2>
+      <h2>⑤ 逐项评分裁决</h2>
       <p class="hint">对每条原始评分选择「采用校准分」或「保留原分」并填写理由，排名将实时重算。</p>
       <div id="detail-panel"></div>
     </section>
