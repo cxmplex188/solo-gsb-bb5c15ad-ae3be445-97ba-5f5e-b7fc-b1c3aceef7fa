@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from . import database as db
 from .csv_io import CSVParseError, build_audit_csv, parse_scores
-from .scoring import SCOPES, SCOPE_JUDGE, analyze
+from .scoring import SCOPES, SCOPE_JUDGE, analyze, stability_experiment
 
 SAMPLE_PATH = os.environ.get(
     "CALIB_SAMPLE_PATH",
@@ -51,6 +51,11 @@ class ScopeBody(BaseModel):
 class DecisionBody(BaseModel):
     use_raw: bool
     reason: str = Field(default="", max_length=2000)
+
+
+class StabilityBody(BaseModel):
+    exclude_type: Literal["judge", "item"]
+    exclude_name: str = Field(min_length=1, max_length=200)
 
 
 @app.get("/api/health")
@@ -130,6 +135,29 @@ def reset_decisions(session_id: str) -> dict[str, Any]:
         analysis = _build_analysis(conn, session_id, scope)
         analysis["reset_count"] = removed
         return analysis
+
+
+@app.post("/api/sessions/{session_id}/stability")
+def stability_check(session_id: str, body: StabilityBody) -> dict[str, Any]:
+    """Temporary what-if run: exclude one judge/item and diff ranks/totals.
+
+    Pure read-only computation — no scores, decisions or session state are
+    modified. The client discards the result when returning to baseline.
+    """
+    with db.get_conn() as conn:
+        if db.get_scope(conn, session_id) is None:
+            raise HTTPException(status_code=404, detail="会话不存在，请先上传数据。")
+        scope = _resolve_scope(conn, session_id, None)
+        records = db.load_scores(conn, session_id)
+        decisions = db.load_decisions(conn, session_id)
+    if not records:
+        raise HTTPException(status_code=404, detail="当前会话没有评分数据，无法进行实验。")
+    try:
+        return stability_experiment(
+            records, decisions, scope, body.exclude_type, body.exclude_name.strip()
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.delete("/api/sessions/{session_id}")

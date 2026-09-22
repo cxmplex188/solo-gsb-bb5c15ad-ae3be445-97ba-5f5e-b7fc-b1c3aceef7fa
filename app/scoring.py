@@ -251,3 +251,128 @@ def analyze(
             "decisions": sum(1 for v in decisions.values() if v[0]),
         },
     }
+
+
+EXCLUDE_JUDGE = "judge"
+EXCLUDE_ITEM = "item"
+EXCLUDE_TYPES = (EXCLUDE_JUDGE, EXCLUDE_ITEM)
+EXCLUDE_LABELS = {
+    EXCLUDE_JUDGE: "评委",
+    EXCLUDE_ITEM: "项目",
+}
+
+
+def _rank_block_snapshot(block: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "raw_total": block["raw_total"],
+        "raw_rank": block["raw_rank"],
+        "cal_total": block["cal_total"],
+        "cal_rank": block["cal_rank"],
+        "eff_total": block["eff_total"],
+        "eff_rank": block["eff_rank"],
+    }
+
+
+def stability_experiment(
+    records: Sequence[Mapping[str, Any]],
+    decisions: Mapping[int, tuple[bool, str]],
+    scope: str,
+    exclude_type: str,
+    exclude_name: str,
+) -> dict[str, Any]:
+    """What-if analysis that recomputes everything with one judge/item removed.
+
+    Baseline is computed from the full record set; the scenario drops every
+    score attributed to ``exclude_name`` (a judge or an item) and re-runs the
+    same calibration / aggregation / ranking pipeline under ``scope``.
+    Decisions attached to removed scores drop with them. Inputs are never
+    mutated and nothing here touches persistence.
+    """
+    if exclude_type not in EXCLUDE_TYPES:
+        raise ValueError(f"未知排除类型: {exclude_type}")
+    if scope not in SCOPES:
+        raise ValueError(f"未知校准范围: {scope}")
+
+    available = sorted({r[exclude_type] for r in records})
+    if exclude_name not in available:
+        raise LookupError(
+            f"找不到要排除的{EXCLUDE_LABELS[exclude_type]}: {exclude_name}"
+        )
+
+    removed = [r for r in records if r[exclude_type] == exclude_name]
+    removed_ids = {r["id"] for r in removed}
+    kept = [r for r in records if r[exclude_type] != exclude_name]
+    kept_decisions = {
+        sid: verdict for sid, verdict in decisions.items() if sid not in removed_ids
+    }
+
+    baseline = analyze(records, decisions, scope=scope)
+    scenario = analyze(kept, kept_decisions, scope=scope)
+
+    affected_per_contestant: dict[str, int] = defaultdict(int)
+    for r in removed:
+        affected_per_contestant[r["contestant"]] += 1
+
+    scenario_blocks = {b["contestant"]: b for b in scenario["contestants"]}
+
+    rows: list[dict[str, Any]] = []
+    for block in baseline["contestants"]:  # already ordered by baseline eff_rank
+        name = block["contestant"]
+        sblock = scenario_blocks.get(name)
+        present = sblock is not None
+        row: dict[str, Any] = {
+            "contestant": name,
+            "present": present,
+            "affected_scores": affected_per_contestant.get(name, 0),
+            "baseline": _rank_block_snapshot(block),
+            "scenario": _rank_block_snapshot(sblock) if present else None,
+        }
+        if present:
+            for kind in ("raw", "cal", "eff"):
+                # Rank delta: baseline rank - scenario rank (positive = moved up).
+                row[f"{kind}_rank_delta"] = (
+                    block[f"{kind}_rank"] - sblock[f"{kind}_rank"]
+                )
+                # Total delta: scenario total - baseline total.
+                row[f"{kind}_total_delta"] = (
+                    sblock[f"{kind}_total"] - block[f"{kind}_total"]
+                )
+        else:
+            for kind in ("raw", "cal", "eff"):
+                row[f"{kind}_rank_delta"] = None
+                row[f"{kind}_total_delta"] = None
+        rows.append(row)
+
+    present_rows = [r for r in rows if r["present"]]
+
+    def _changed(kind: str) -> int:
+        return sum(1 for r in present_rows if r[f"{kind}_rank_delta"] not in (0, None))
+
+    eff_deltas = [r["eff_rank_delta"] for r in present_rows]
+    eff_total_deltas = [abs(r["eff_total_delta"]) for r in present_rows]
+    summary = {
+        "raw_rank_changed": _changed("raw"),
+        "cal_rank_changed": _changed("cal"),
+        "eff_rank_changed": _changed("eff"),
+        "eff_moved_up": sum(1 for d in eff_deltas if d and d > 0),
+        "eff_moved_down": sum(1 for d in eff_deltas if d and d < 0),
+        "max_eff_rank_gain": max((d for d in eff_deltas if d), default=0),
+        "max_eff_rank_loss": max((-d for d in eff_deltas if d and d < 0), default=0),
+        "max_eff_total_delta_abs": max(eff_total_deltas, default=0.0),
+    }
+
+    return {
+        "scope": scope,
+        "scope_label": SCOPE_LABELS[scope],
+        "exclusion": {
+            "type": exclude_type,
+            "type_label": EXCLUDE_LABELS[exclude_type],
+            "name": exclude_name,
+        },
+        "available": available,
+        "removed_scores": len(removed),
+        "baseline_counts": dict(baseline["counts"]),
+        "scenario_counts": dict(scenario["counts"]),
+        "summary": summary,
+        "contestants": rows,
+    }

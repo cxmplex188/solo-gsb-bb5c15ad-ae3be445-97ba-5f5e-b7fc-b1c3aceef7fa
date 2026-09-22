@@ -65,9 +65,30 @@
       <div id="rank-table-wrap" class="table-wrap"></div>
     </section>
 
-    <!-- 4. 逐项裁决 -->
+    <!-- 4. 排名稳定性实验 -->
     <section class="card">
-      <h2>④ 逐项评分裁决</h2>
+      <h2>④ 排名稳定性实验（临时模拟，不保存）</h2>
+      <p class="hint">
+        选择<b>临时排除一名评委或一个项目</b>，系统按当前校准范围重算原始分、校准分、最终总分与竞赛名次，
+        并逐位展示每位选手相对基线的名次/总分变化及被移除的评分条数。
+        实验结果仅保留在当前页面，<b>不会写入裁决或数据库</b>；上传、切换范围或修改裁决会自动清除实验结果，也可手动恢复基线。
+      </p>
+      <div class="toolbar stability-controls">
+        <select id="stability-type" class="select">
+          <option value="judge">排除评委</option>
+          <option value="item">排除项目</option>
+        </select>
+        <select id="stability-name" class="select"></select>
+        <button id="btn-stability-run" class="btn btn-primary">运行实验</button>
+        <button id="btn-stability-clear" class="btn btn-ghost" disabled>清除结果，恢复基线</button>
+        <span id="stability-msg" class="msg"></span>
+      </div>
+      <div id="stability-result" class="stability-result"></div>
+    </section>
+
+    <!-- 5. 逐项裁决 -->
+    <section class="card">
+      <h2>⑤ 逐项评分裁决</h2>
       <p class="hint">对每条原始评分选择「采用校准分」或「保留原分」并填写理由，排名将实时重算。</p>
       <div id="detail-panel"></div>
     </section>

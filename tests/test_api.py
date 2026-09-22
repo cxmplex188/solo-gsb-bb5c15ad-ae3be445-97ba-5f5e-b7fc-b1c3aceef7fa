@@ -95,7 +95,75 @@ class TestAPI(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertGreater(r.json()["counts"]["scores"], 0)
 
-    def test_10_clear(self):
+    def test_10_stability_experiment(self):
+        # Sample is loaded (6 contestants x 4 judges x 3 items).
+        analysis = client.get(f"/api/sessions/{SID}/analysis").json()
+        judge = analysis["judges"][0]
+        n_scores = analysis["counts"]["scores"]
+
+        r = client.post(
+            f"/api/sessions/{SID}/stability",
+            json={"exclude_type": "judge", "exclude_name": judge},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        data = r.json()
+        self.assertEqual(data["exclusion"]["type"], "judge")
+        self.assertEqual(data["exclusion"]["name"], judge)
+        self.assertEqual(data["baseline_counts"]["scores"], n_scores)
+        # Every contestant x item has one score per judge -> 6 * 3 removed.
+        self.assertEqual(data["removed_scores"], 18)
+        self.assertEqual(data["scenario_counts"]["scores"], n_scores - 18)
+        self.assertEqual(len(data["contestants"]), analysis["counts"]["contestants"])
+
+        # Baseline totals are echoed and every row carries deltas.
+        base_blocks = {b["contestant"]: b for b in analysis["contestants"]}
+        for row in data["contestants"]:
+            self.assertTrue(row["present"])
+            self.assertEqual(row["baseline"]["eff_rank"], base_blocks[row["contestant"]]["eff_rank"])
+            for kind in ("raw", "cal", "eff"):
+                self.assertIn(f"{kind}_rank_delta", row)
+                self.assertIn(f"{kind}_total_delta", row)
+            self.assertGreaterEqual(row["affected_scores"], 1)
+
+        # Item exclusion too.
+        item = analysis["items"][0]
+        r2 = client.post(
+            f"/api/sessions/{SID}/stability",
+            json={"exclude_type": "item", "exclude_name": item},
+        )
+        self.assertEqual(r2.status_code, 200)
+        self.assertEqual(r2.json()["exclusion"]["type"], "item")
+        self.assertEqual(r2.json()["removed_scores"], 24)  # 6 contestants x 4 judges
+
+        # The experiment must not mutate scores/decisions: baseline is unchanged.
+        again = client.get(f"/api/sessions/{SID}/analysis").json()
+        self.assertEqual(again["counts"]["scores"], n_scores)
+        self.assertEqual(len(again["judges"]), 4)
+
+    def test_11_stability_errors(self):
+        # Unknown judge name -> 400.
+        r = client.post(
+            f"/api/sessions/{SID}/stability",
+            json={"exclude_type": "judge", "exclude_name": "不存在的评委"},
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("评委", r.json()["detail"])
+
+        # Bad payload -> 422 from pydantic.
+        r2 = client.post(
+            f"/api/sessions/{SID}/stability",
+            json={"exclude_type": "round", "exclude_name": "X"},
+        )
+        self.assertEqual(r2.status_code, 422)
+
+        # Unknown session -> 404.
+        r3 = client.post(
+            "/api/sessions/no-such-session/stability",
+            json={"exclude_type": "judge", "exclude_name": "J"},
+        )
+        self.assertEqual(r3.status_code, 404)
+
+    def test_12_clear(self):
         r = client.delete(f"/api/sessions/{SID}")
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["cleared"])
@@ -103,6 +171,12 @@ class TestAPI(unittest.TestCase):
         self.assertEqual(r2.json()["counts"]["scores"], 0)
         # Export after clearing must fail
         self.assertEqual(client.get(f"/api/sessions/{SID}/export").status_code, 404)
+        # Stability experiment on an empty session must also fail
+        r3 = client.post(
+            f"/api/sessions/{SID}/stability",
+            json={"exclude_type": "judge", "exclude_name": "J"},
+        )
+        self.assertEqual(r3.status_code, 404)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ document.getElementById("session-id").textContent = SESSION_ID;
 
 // ---------- State ----------
 let analysis = null;
+let stability = null; // 排名稳定性实验结果（纯前端临时态，不持久化）
 
 const $ = (sel) => document.querySelector(sel);
 const dashboard = $("#dashboard");
@@ -85,6 +86,112 @@ function render() {
   renderReversals();
   renderRanks();
   renderDetails();
+  renderStability();
+}
+
+// ---------- Ranking stability experiment ----------
+const stabilityTypeSel = $("#stability-type");
+const stabilityNameSel = $("#stability-name");
+const stabilityBtnRun = $("#btn-stability-run");
+const stabilityBtnClear = $("#btn-stability-clear");
+
+function setStabilityMsg(text, cls = "") {
+  const el = $("#stability-msg");
+  el.textContent = text;
+  el.className = "msg " + cls;
+}
+
+// Discard the what-if result and return to the baseline table.
+function clearStability(silent = false) {
+  stability = null;
+  setStabilityMsg("");
+  renderStability();
+  if (!silent) toast("已恢复基线排名");
+}
+
+function syncStabilityControls() {
+  const hasData = !!(analysis && analysis.counts.scores > 0);
+  const type = stabilityTypeSel.value;
+  const names = hasData ? (type === "judge" ? analysis.judges : analysis.items) : [];
+  const prev = stabilityNameSel.value;
+  stabilityNameSel.innerHTML =
+    `<option value="" disabled${names.length ? "" : " selected"}>请选择${type === "judge" ? "评委" : "项目"}…</option>` +
+    names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  if (names.includes(prev)) stabilityNameSel.value = prev;
+  stabilityBtnRun.disabled = !hasData;
+  stabilityNameSel.disabled = !hasData;
+  stabilityTypeSel.disabled = !hasData;
+  stabilityBtnClear.disabled = stability === null;
+}
+
+function signedNum(d, digits = 2) {
+  if (d === null || d === undefined) return "-";
+  return (d > 0 ? "+" : d < 0 ? "−" : "") + fmt(Math.abs(d), digits);
+}
+
+function totalDeltaHtml(d) {
+  if (d === null || d === undefined) return `<span class="delta-flat">-</span>`;
+  if (d > 0) return `<span class="delta-up">${signedNum(d)}</span>`;
+  if (d < 0) return `<span class="delta-down">${signedNum(d)}</span>`;
+  return `<span class="delta-flat">0.00</span>`;
+}
+
+function renderStability() {
+  const panel = $("#stability-result");
+  syncStabilityControls();
+  if (!stability) {
+    panel.innerHTML = "";
+    return;
+  }
+  const ex = stability.exclusion;
+  const s = stability.summary;
+
+  const head = `
+    <tr>
+      <th class="num">基线<br>最终名次</th><th>选手</th><th class="num">受影响<br>评分数</th>
+      <th class="num">原始<br>基线总分</th><th class="num">实验<br>原始总分</th><th class="num">原始<br>总分变化</th>
+      <th class="num">基线<br>原始名次</th><th class="num">实验<br>原始名次</th><th class="num">原始<br>名次变化</th>
+      <th class="num">校准<br>基线总分</th><th class="num">实验<br>校准总分</th><th class="num">校准<br>总分变化</th>
+      <th class="num">基线<br>校准名次</th><th class="num">实验<br>校准名次</th><th class="num">校准<br>名次变化</th>
+      <th class="num">最终<br>基线总分</th><th class="num">实验<br>最终总分</th><th class="num">最终<br>总分变化</th>
+      <th class="num">基线<br>最终名次</th><th class="num">实验<br>最终名次</th><th class="num">最终<br>名次变化</th>
+    </tr>`;
+
+  const rows = stability.contestants.map((r) => {
+    if (!r.present) {
+      return `<tr class="gone-row"><td class="num"><b>${r.baseline.eff_rank}</b></td>
+        <td><span class="gone-name">${esc(r.contestant)}</span></td>
+        <td class="num">${r.affected_scores}</td>
+        <td class="num">${fmt(r.baseline.raw_total)}</td>
+        <td colspan="17" class="num gone-note">无剩余评分，无法计算名次（校准分 / 最终分同样不可计算）</td></tr>`;
+    }
+    const b = r.baseline, sc = r.scenario;
+    const cls = r.eff_rank_delta && r.eff_rank_delta !== 0 ? "rank-shift-row" : "";
+    return `
+    <tr class="${cls}">
+      <td class="num"><b>${b.eff_rank}</b></td>
+      <td>${esc(r.contestant)}</td>
+      <td class="num"><b>${r.affected_scores}</b></td>
+      <td class="num">${fmt(b.raw_total)}</td><td class="num">${fmt(sc.raw_total)}</td><td class="num">${totalDeltaHtml(r.raw_total_delta)}</td>
+      <td class="num">${b.raw_rank}</td><td class="num">${sc.raw_rank}</td><td class="num">${deltaHtml(r.raw_rank_delta)}</td>
+      <td class="num">${fmt(b.cal_total)}</td><td class="num">${fmt(sc.cal_total)}</td><td class="num">${totalDeltaHtml(r.cal_total_delta)}</td>
+      <td class="num">${b.cal_rank}</td><td class="num">${sc.cal_rank}</td><td class="num">${deltaHtml(r.cal_rank_delta)}</td>
+      <td class="num"><b>${fmt(b.eff_total)}</b></td><td class="num"><b>${fmt(sc.eff_total)}</b></td><td class="num">${totalDeltaHtml(r.eff_total_delta)}</td>
+      <td class="num">${b.eff_rank}</td><td class="num"><b>${sc.eff_rank}</b></td><td class="num">${deltaHtml(r.eff_rank_delta)}</td>
+    </tr>`;
+  }).join("");
+
+  panel.innerHTML = `
+    <div class="stability-banner">
+      实验：临时排除${ex.type_label} <b>${esc(ex.name)}</b>（校准范围：${esc(stability.scope_label)}）｜
+      共移除 <b>${stability.removed_scores}</b> 条评分（${stability.baseline_counts.scores} → ${stability.scenario_counts.scores}）。
+      最终名次变化：<b class="${s.eff_rank_changed ? "delta-down" : "delta-flat"}">${s.eff_rank_changed}</b> 位
+      <span class="delta-up">↑${s.eff_moved_up}</span> / <span class="delta-down">↓${s.eff_moved_down}</span>；
+      原始名次变化 ${s.raw_rank_changed} 位，校准名次变化 ${s.cal_rank_changed} 位；
+      最终总分最大绝对变化 ${fmt(s.max_eff_total_delta_abs)}。
+      <span class="stability-note">本结果为临时模拟，不写入会话裁决或数据库。</span>
+    </div>
+    <div class="table-wrap stability-table-wrap"><table>${head}${rows}</table></div>`;
 }
 
 function renderGroups() {
@@ -228,6 +335,7 @@ async function pushDecision(scoreId, useRaw, reason) {
         body: JSON.stringify({ use_raw: useRaw, reason }),
       }
     );
+    stability = null; // 裁决变化会改变最终总分，实验结果作废
     render();
     toast("排名已实时重算");
   } catch (err) {
@@ -265,9 +373,11 @@ function onReasonInput(ev) {
 async function loadAnalysis() {
   try {
     analysis = await api(`/api/sessions/${SESSION_ID}/analysis`);
+    stability = null;
     render();
   } catch (_) {
     analysis = null;
+    stability = null;
     render();
   }
 }
@@ -290,6 +400,7 @@ $("#file-input").addEventListener("change", async (ev) => {
       method: "POST",
       body: fd,
     });
+    stability = null;
     render();
     setMsg(`已导入 ${analysis.counts.scores} 条评分`, "ok");
     toast("上传成功，已完成稳健标准化");
@@ -308,6 +419,7 @@ $("#btn-sample").addEventListener("click", async () => {
     analysis = await api(`/api/sessions/${SESSION_ID}/sample?scope=${encodeURIComponent(scope)}`, {
       method: "POST",
     });
+    stability = null;
     render();
     setMsg(`示例数据已载入（${analysis.counts.scores} 条评分）`, "ok");
     toast("示例数据已载入");
@@ -326,6 +438,7 @@ document.querySelectorAll('input[name="scope"]').forEach((radio) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ scope: ev.target.value }),
       });
+      stability = null; // 实验按校准范围重算，旧结果与新基线无关
       render();
       toast("校准范围已切换");
     } catch (err) {
@@ -339,6 +452,7 @@ $("#btn-reset-decisions").addEventListener("click", async () => {
   if (!confirm("确定清除全部「保留原分」裁决与理由，统一恢复为采用校准分？")) return;
   try {
     analysis = await api(`/api/sessions/${SESSION_ID}/decisions/reset`, { method: "POST" });
+    stability = null;
     render();
     toast("已全部恢复为采用校准分");
   } catch (err) {
@@ -355,6 +469,7 @@ $("#btn-clear").addEventListener("click", async () => {
   try {
     await api(`/api/sessions/${SESSION_ID}`, { method: "DELETE" });
     analysis = null;
+    stability = null;
     render();
     setMsg("会话已清空。");
     toast("会话已清空");
@@ -362,6 +477,35 @@ $("#btn-clear").addEventListener("click", async () => {
     toast("清空失败：" + err.message, true);
   }
 });
+
+// ---------- Ranking stability experiment actions ----------
+stabilityTypeSel.addEventListener("change", syncStabilityControls);
+
+stabilityBtnRun.addEventListener("click", async () => {
+  const type = stabilityTypeSel.value;
+  const name = stabilityNameSel.value;
+  if (!name) {
+    setStabilityMsg(`请先选择要排除的${type === "judge" ? "评委" : "项目"}。`, "error");
+    return;
+  }
+  setStabilityMsg("计算中…");
+  try {
+    stability = await api(`/api/sessions/${SESSION_ID}/stability`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ exclude_type: type, exclude_name: name }),
+    });
+    setStabilityMsg("实验完成（临时结果，未保存）", "ok");
+    renderStability();
+  } catch (err) {
+    stability = null;
+    setStabilityMsg(err.message, "error");
+    renderStability();
+    toast("实验失败：" + err.message, true);
+  }
+});
+
+stabilityBtnClear.addEventListener("click", () => clearStability());
 
 // ---------- Init ----------
 loadAnalysis();

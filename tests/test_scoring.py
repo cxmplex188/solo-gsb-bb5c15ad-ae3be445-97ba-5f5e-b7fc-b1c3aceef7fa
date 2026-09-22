@@ -5,7 +5,13 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.scoring import MAD_K, analyze, competition_rank, robust_params
+from app.scoring import (
+    MAD_K,
+    analyze,
+    competition_rank,
+    robust_params,
+    stability_experiment,
+)
 
 
 def recs(data):
@@ -133,6 +139,120 @@ class TestCalibration(unittest.TestCase):
     def test_bad_scope(self):
         with self.assertRaises(ValueError):
             analyze(recs(self.data), {}, "bogus")
+
+
+class TestStabilityExperiment(unittest.TestCase):
+    def setUp(self):
+        # 4 contestants x 3 judges x 1 item; JC is a wild outlier judge.
+        data = [
+            ("C1", "JA", "P1", 8.30), ("C2", "JA", "P1", 8.00),
+            ("C3", "JA", "P1", 7.90), ("C4", "JA", "P1", 7.80),
+            ("C1", "JB", "P1", 8.30), ("C2", "JB", "P1", 8.00),
+            ("C3", "JB", "P1", 7.85), ("C4", "JB", "P1", 7.75),
+            ("C1", "JC", "P1", 5.0), ("C2", "JC", "P1", 9.5),
+            ("C3", "JC", "P1", 7.2), ("C4", "JC", "P1", 6.8),
+        ]
+        self.records = recs(data)
+        # Add a second item so item exclusion leaves partial data.
+        self.records += recs([
+            ("C1", "JA", "P2", 8.2), ("C2", "JA", "P2", 8.1),
+            ("C3", "JA", "P2", 7.8), ("C4", "JA", "P2", 7.7),
+            ("C1", "JB", "P2", 8.1), ("C2", "JB", "P2", 8.0),
+            ("C3", "JB", "P2", 7.9), ("C4", "JB", "P2", 7.8),
+        ])
+
+    def test_exclude_judge_baseline_fields(self):
+        res = stability_experiment(self.records, {}, "judge", "judge", "JC")
+        self.assertEqual(res["exclusion"]["type"], "judge")
+        self.assertEqual(res["exclusion"]["name"], "JC")
+        self.assertEqual(res["removed_scores"], 4)
+        self.assertEqual(res["baseline_counts"]["scores"], 20)
+        self.assertEqual(res["scenario_counts"]["scores"], 16)
+        self.assertEqual(res["scenario_counts"]["judges"], 2)
+        # Every contestant loses exactly one score (JC's).
+        self.assertTrue(all(r["affected_scores"] == 1 for r in res["contestants"]))
+
+    def test_deltas_match_independent_rerun(self):
+        baseline = analyze(self.records, {}, "judge")
+        res = stability_experiment(self.records, {}, "judge", "judge", "JC")
+        kept = [r for r in self.records if r["judge"] != "JC"]
+        scenario = analyze(kept, {}, "judge")
+
+        b_map = {b["contestant"]: b for b in baseline["contestants"]}
+        s_map = {b["contestant"]: b for b in scenario["contestants"]}
+        self.assertEqual(len(res["contestants"]), len(baseline["contestants"]))
+        for row in res["contestants"]:
+            name = row["contestant"]
+            self.assertTrue(row["present"])
+            self.assertAlmostEqual(
+                row["raw_total_delta"],
+                s_map[name]["raw_total"] - b_map[name]["raw_total"],
+            )
+            self.assertEqual(
+                row["eff_rank_delta"],
+                b_map[name]["eff_rank"] - s_map[name]["eff_rank"],
+            )
+            self.assertEqual(row["baseline"]["eff_rank"], b_map[name]["eff_rank"])
+            self.assertEqual(row["scenario"]["eff_rank"], s_map[name]["eff_rank"])
+
+    def test_excluding_outlier_judge_changes_rank(self):
+        # With JC removed the raw ranking must lose the reversal (C1 leads C2).
+        res = stability_experiment(self.records, {}, "judge", "judge", "JC")
+        rows = {r["contestant"]: r for r in res["contestants"]}
+        # JC gives C2 9.5 vs C1 5.0 -> removing it moves C1 up / C2 down.
+        self.assertGreaterEqual(rows["C1"]["raw_rank_delta"], 0)
+        self.assertLess(rows["C2"]["raw_rank_delta"], 0)
+        self.assertEqual(res["summary"]["eff_moved_up"] + res["summary"]["eff_moved_down"],
+                         res["summary"]["eff_rank_changed"])
+
+    def test_exclude_item_leaves_partial_data(self):
+        res = stability_experiment(self.records, {}, "judge_item", "item", "P1")
+        self.assertEqual(res["exclusion"]["type_label"], "项目")
+        self.assertEqual(res["removed_scores"], 12)
+        self.assertEqual(res["scenario_counts"]["items"], 1)
+        # Everyone still scored P2, so all remain present.
+        self.assertTrue(all(r["present"] for r in res["contestants"]))
+        # Baseline totals contain two items, scenario only P2.
+        for row in res["contestants"]:
+            self.assertNotAlmostEqual(
+                row["scenario"]["eff_total"], row["baseline"]["eff_total"]
+            )
+
+    def test_excluded_only_contestant_goes_missing(self):
+        # C1 is only ever scored by judge JA -> removing JA removes C1 entirely.
+        data = [
+            ("C1", "JA", "P1", 9.0),
+            ("C2", "JA", "P1", 7.0), ("C2", "JB", "P1", 6.0),
+        ]
+        records = recs(data)
+        res = stability_experiment(records, {}, "judge", "judge", "JA")
+        rows = {r["contestant"]: r for r in res["contestants"]}
+        self.assertFalse(rows["C1"]["present"])
+        self.assertIsNone(rows["C1"]["scenario"])
+        self.assertIsNone(rows["C1"]["eff_rank_delta"])
+        self.assertEqual(rows["C1"]["affected_scores"], 1)
+        self.assertTrue(rows["C2"]["present"])
+        self.assertEqual(rows["C2"]["affected_scores"], 1)
+
+    def test_inputs_not_mutated_and_decisions_follow_removed_scores(self):
+        records = recs([
+            ("C1", "JA", "P1", 8.0), ("C2", "JA", "P1", 7.0),
+            ("C1", "JB", "P1", 9.0), ("C2", "JB", "P1", 6.0),
+        ])
+        before = [dict(r) for r in records]
+        decisions = {1: (True, "keep")}  # id 1 belongs to judge JA
+        res = stability_experiment(records, decisions, "judge", "judge", "JB")
+        self.assertEqual(records, before)
+        self.assertEqual(len(decisions), 1)
+        # JB excluded: its two scores are gone, JA's decision stays in effect.
+        self.assertEqual(res["removed_scores"], 2)
+        self.assertEqual(res["scenario_counts"]["decisions"], 1)
+
+    def test_unknown_exclusion(self):
+        with self.assertRaises(LookupError):
+            stability_experiment(self.records, {}, "judge", "judge", "NOBODY")
+        with self.assertRaises(ValueError):
+            stability_experiment(self.records, {}, "judge", "round", "P1")
 
 
 if __name__ == "__main__":
